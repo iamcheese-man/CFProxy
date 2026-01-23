@@ -1,5 +1,5 @@
 // ==== CONFIG ====
-const SECRET_KEY = "A65xR14L390"; // <-- change this to your secret key
+const SECRET_KEY = "mysecret123"; // <-- change to your secret key
 
 addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request))
@@ -10,7 +10,11 @@ async function handleRequest(req) {
   const pathSegments = urlObj.pathname.split("/").filter(Boolean) // split path into segments
 
   // ==== CHECK SECRET KEY ====
-  const key = pathSegments[0] // first segment is the key
+  if (pathSegments.length === 0) {
+    return new Response("Unauthorized: missing key", { status: 401 })
+  }
+
+  const key = pathSegments[0]
   if (key !== SECRET_KEY) {
     return new Response("Unauthorized: invalid key", { status: 401 })
   }
@@ -44,6 +48,7 @@ async function handleRequest(req) {
       headers: req.headers
     }
 
+    // Include body if method allows
     if (req.method !== "GET" && req.method !== "HEAD") {
       init.body = await req.text()
     }
