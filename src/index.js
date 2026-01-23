@@ -1,31 +1,40 @@
+// ==== CONFIG ====
+const SECRET_KEY = "A65xR14L390"; // <-- change this to your secret key
+
 addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request))
 })
 
 async function handleRequest(req) {
-  let urlStr
+  const urlObj = new URL(req.url)
+  const pathSegments = urlObj.pathname.split("/").filter(Boolean) // split path into segments
 
-  // Try query parameter first
-  try {
-    const urlObj = new URL(req.url)
-    urlStr = urlObj.searchParams.get("url")
-  } catch (e) {
-    // ignore
+  // ==== CHECK SECRET KEY ====
+  const key = pathSegments[0] // first segment is the key
+  if (key !== SECRET_KEY) {
+    return new Response("Unauthorized: invalid key", { status: 401 })
   }
 
-  // If no query, try path-style
-  if (!urlStr) {
-    urlStr = req.url.replace(/^https?:\/\/[^\/]+\/?/, "") // strip domain + leading slash
+  // ==== DETERMINE TARGET URL ====
+  let targetUrl = null
+
+  // 1️⃣ Query param style: /KEY/?url=https://example.com
+  if (urlObj.searchParams.has("url")) {
+    targetUrl = urlObj.searchParams.get("url")
   }
 
-  // If still empty, return error
-  if (!urlStr) {
+  // 2️⃣ Path style: /KEY/https://example.com
+  else if (pathSegments.length > 1) {
+    targetUrl = pathSegments.slice(1).join("/")
+  }
+
+  if (!targetUrl) {
     return new Response("Missing target URL", { status: 400 })
   }
 
   // Auto-add https:// if missing
-  if (!/^https?:\/\//i.test(urlStr)) {
-    urlStr = "https://" + urlStr
+  if (!/^https?:\/\//i.test(targetUrl)) {
+    targetUrl = "https://" + targetUrl
   }
 
   try {
@@ -35,16 +44,14 @@ async function handleRequest(req) {
       headers: req.headers
     }
 
-    // Only include body if method allows
     if (req.method !== "GET" && req.method !== "HEAD") {
       init.body = await req.text()
     }
 
-    const response = await fetch(urlStr, init)
+    const response = await fetch(targetUrl, init)
 
-    // Clone headers
+    // Clone headers + add CORS
     const newHeaders = new Headers(response.headers)
-    // Optional: add CORS headers
     newHeaders.set("Access-Control-Allow-Origin", "*")
     newHeaders.set("Access-Control-Allow-Methods", "*")
     newHeaders.set("Access-Control-Allow-Headers", "*")
