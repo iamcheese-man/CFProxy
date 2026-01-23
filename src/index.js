@@ -1,37 +1,32 @@
-// ==== CONFIG ====
-const SECRET_KEY = "A53GalaxyiPhonexR14L390"; // <-- change to your secret key
-
 addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request))
 })
 
 async function handleRequest(req) {
+  // ==== CONFIG ====
+  const SECRET_KEY = "A53xR14L390" // <-- change this to your secret key
+
   const urlObj = new URL(req.url)
   const pathSegments = urlObj.pathname.split("/").filter(Boolean) // split path into segments
 
   // ==== CHECK SECRET KEY ====
-  if (pathSegments.length === 0) {
-    return new Response("Unauthorized: missing key", { status: 401 })
-  }
-
-  const key = pathSegments[0]
-  if (key !== SECRET_KEY) {
+  if (pathSegments.length === 0 || pathSegments[0] !== SECRET_KEY) {
     return new Response("Unauthorized: invalid key", { status: 401 })
   }
 
   // ==== DETERMINE TARGET URL ====
   let targetUrl = null
 
-  // 1️⃣ Query param style: /KEY/?url=https://example.com
+  // 1️⃣ Query parameter style: /KEY/?url=https://example.com
   if (urlObj.searchParams.has("url")) {
     targetUrl = urlObj.searchParams.get("url")
   }
-
   // 2️⃣ Path style: /KEY/https://example.com
   else if (pathSegments.length > 1) {
     targetUrl = pathSegments.slice(1).join("/")
   }
 
+  // No target URL?
   if (!targetUrl) {
     return new Response("Missing target URL", { status: 400 })
   }
@@ -42,7 +37,7 @@ async function handleRequest(req) {
   }
 
   try {
-    // Forward the request
+    // ==== FORWARD REQUEST ====
     const init = {
       method: req.method,
       headers: req.headers
@@ -55,7 +50,7 @@ async function handleRequest(req) {
 
     const response = await fetch(targetUrl, init)
 
-    // Clone headers + add CORS
+    // ==== CLONE HEADERS + CORS ====
     const newHeaders = new Headers(response.headers)
     newHeaders.set("Access-Control-Allow-Origin", "*")
     newHeaders.set("Access-Control-Allow-Methods", "*")
