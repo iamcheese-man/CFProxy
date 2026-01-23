@@ -1,6 +1,6 @@
 export default {
   async fetch(req) {
-    // CORS preflight
+    // Handle CORS preflight
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -14,13 +14,20 @@ export default {
     }
 
     const url = new URL(req.url)
-    const target = url.searchParams.get("url")
 
+    // 1️⃣ Try query parameter first
+    let target = url.searchParams.get("url")
+
+    // 2️⃣ If no query, try path-style
     if (!target) {
-      return new Response("Missing ?url=", { status: 400 })
+      target = req.url.split(req.origin)[1].slice(1)
     }
 
-    // Clone headers
+    if (!target) {
+      return new Response("Missing target URL", { status: 400 })
+    }
+
+    // Clone headers and remove unsafe ones
     const headers = new Headers(req.headers)
     headers.delete("host")
     headers.delete("origin")
@@ -33,7 +40,6 @@ export default {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
       )
     }
-
     if (!headers.has("accept")) {
       headers.set(
         "accept",
@@ -41,15 +47,19 @@ export default {
       )
     }
 
-    const proxyReq = new Request(target, {
-      method: req.method,
-      headers,
-      body: ["GET", "HEAD"].includes(req.method) ? null : req.body,
-      redirect: "follow"
-    })
+    let res
+    try {
+      res = await fetch(target, {
+        method: req.method,
+        headers,
+        body: ["GET", "HEAD"].includes(req.method) ? null : req.body,
+        redirect: "follow"
+      })
+    } catch (err) {
+      return new Response("Invalid target URL or fetch failed", { status: 400 })
+    }
 
-    const res = await fetch(proxyReq)
-
+    // Forward response headers and add CORS
     const resHeaders = new Headers(res.headers)
     resHeaders.set("Access-Control-Allow-Origin", "*")
     resHeaders.set("Access-Control-Expose-Headers", "*")
