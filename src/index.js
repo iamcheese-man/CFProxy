@@ -7,37 +7,43 @@ const SECRET_KEY = "A53xR14L390"; // change this to your secret key
 async function handleRequest(req) {
   const urlObj = new URL(req.url);
   const pathSegments = urlObj.pathname.split("/").filter(Boolean);
-
+  
   // ==== ENFORCE KEY ====
-  if (pathSegments.length < 2) {
-    return new Response("Unauthorized: key missing or URL missing", { status: 401 });
+  if (pathSegments.length < 1) {
+    return new Response("Unauthorized: key missing", { status: 401 });
   }
+  
   if (pathSegments[0] !== SECRET_KEY) {
     return new Response("Unauthorized: invalid key", { status: 401 });
   }
-
+  
   // ==== DETERMINE TARGET URL ====
   let target = null;
-
-  // Path style: /KEY/https://example.com
-  target = pathSegments.slice(1).join("/");
-
-  // Query parameter style (only works if key present in path)
+  
+  // Query parameter style
   if (urlObj.searchParams.has("url")) {
     target = urlObj.searchParams.get("url");
   }
-
-  if (!target) return new Response("Missing target URL", { status: 400 });
-
+  // Path style: /KEY/https://example.com
+  else if (pathSegments.length > 1) {
+    target = pathSegments.slice(1).join("/");
+  }
+  
+  if (!target) {
+    return new Response("Missing target URL", { status: 400 });
+  }
+  
   // Auto-add https:// if missing
-  if (!/^https?:\/\//i.test(target)) target = "https://" + target;
-
+  if (!/^https?:\/\//i.test(target)) {
+    target = "https://" + target;
+  }
+  
   // Clone headers and remove unsafe ones
   const headers = new Headers(req.headers);
   headers.delete("host");
   headers.delete("origin");
   headers.delete("referer");
-
+  
   // Browser-like defaults
   if (!headers.has("user-agent")) {
     headers.set(
@@ -51,7 +57,7 @@ async function handleRequest(req) {
       "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     );
   }
-
+  
   let res;
   try {
     res = await fetch(target, {
@@ -63,12 +69,12 @@ async function handleRequest(req) {
   } catch (err) {
     return new Response(`Fetch failed: ${err.message}`, { status: 400 });
   }
-
+  
   // Forward headers + CORS
   const resHeaders = new Headers(res.headers);
   resHeaders.set("Access-Control-Allow-Origin", "*");
   resHeaders.set("Access-Control-Expose-Headers", "*");
-
+  
   const body = await res.arrayBuffer();
   return new Response(body, {
     status: res.status,
