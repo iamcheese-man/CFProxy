@@ -1,72 +1,62 @@
-export default {
-  async fetch(req) {
-    // Handle CORS preflight
-    if (req.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "*",
-          "Access-Control-Allow-Headers": "*",
-          "Access-Control-Max-Age": "86400"
-        }
-      })
+addEventListener("fetch", event => {
+  event.respondWith(handleRequest(event.request))
+})
+
+async function handleRequest(req) {
+  let urlStr
+
+  // Try query parameter first
+  try {
+    const urlObj = new URL(req.url)
+    urlStr = urlObj.searchParams.get("url")
+  } catch (e) {
+    // ignore
+  }
+
+  // If no query, try path-style
+  if (!urlStr) {
+    urlStr = req.url.replace(/^https?:\/\/[^\/]+\/?/, "") // strip domain + leading slash
+  }
+
+  // If still empty, return error
+  if (!urlStr) {
+    return new Response("Missing target URL", { status: 400 })
+  }
+
+  // Auto-add https:// if missing
+  if (!/^https?:\/\//i.test(urlStr)) {
+    urlStr = "https://" + urlStr
+  }
+
+  try {
+    // Forward the request
+    const init = {
+      method: req.method,
+      headers: req.headers
     }
 
-    const url = new URL(req.url)
-
-    // 1️⃣ Try query parameter first
-    let target = url.searchParams.get("url")
-
-    // 2️⃣ If no query, try path-style
-    if (!target) {
-      target = req.url.split(req.origin)[1].slice(1)
+    // Only include body if method allows
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      init.body = await req.text()
     }
 
-    if (!target) {
-      return new Response("Missing target URL", { status: 400 })
-    }
+    const response = await fetch(urlStr, init)
 
-    // Clone headers and remove unsafe ones
-    const headers = new Headers(req.headers)
-    headers.delete("host")
-    headers.delete("origin")
-    headers.delete("referer")
+    // Clone headers
+    const newHeaders = new Headers(response.headers)
+    // Optional: add CORS headers
+    newHeaders.set("Access-Control-Allow-Origin", "*")
+    newHeaders.set("Access-Control-Allow-Methods", "*")
+    newHeaders.set("Access-Control-Allow-Headers", "*")
 
-    // Browser-like defaults
-    if (!headers.has("user-agent")) {
-      headers.set(
-        "user-agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      )
-    }
-    if (!headers.has("accept")) {
-      headers.set(
-        "accept",
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      )
-    }
+    const body = await response.arrayBuffer()
 
-    let res
-    try {
-      res = await fetch(target, {
-        method: req.method,
-        headers,
-        body: ["GET", "HEAD"].includes(req.method) ? null : req.body,
-        redirect: "follow"
-      })
-    } catch (err) {
-      return new Response("Invalid target URL or fetch failed", { status: 400 })
-    }
-
-    // Forward response headers and add CORS
-    const resHeaders = new Headers(res.headers)
-    resHeaders.set("Access-Control-Allow-Origin", "*")
-    resHeaders.set("Access-Control-Expose-Headers", "*")
-
-    return new Response(res.body, {
-      status: res.status,
-      headers: resHeaders
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: newHeaders
     })
+  } catch (err) {
+    return new Response("Error fetching target URL: " + err.message, { status: 502 })
   }
 }
