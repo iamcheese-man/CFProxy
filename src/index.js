@@ -1,5 +1,5 @@
 // ==== CONFIG ====
-const SECRET_KEY = "mysecret123"; // <-- change to your secret key
+const SECRET_KEY = "A53GalaxyiPhonexR14L390"; // <-- change to your secret key
 
 addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request))
