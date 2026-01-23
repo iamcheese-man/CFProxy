@@ -38,11 +38,22 @@ async function handleRequest(req) {
     target = "https://" + target;
   }
   
+  // Parse target URL to get the host
+  let targetUrl;
+  try {
+    targetUrl = new URL(target);
+  } catch (err) {
+    return new Response(`Invalid target URL: ${err.message}`, { status: 400 });
+  }
+  
   // Clone headers and remove unsafe ones
   const headers = new Headers(req.headers);
   headers.delete("host");
   headers.delete("origin");
   headers.delete("referer");
+  
+  // Set the Host header to match the target domain (CRITICAL for Cloudflare)
+  headers.set("host", targetUrl.host);
   
   // Browser-like defaults
   if (!headers.has("user-agent")) {
