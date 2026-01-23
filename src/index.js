@@ -24,9 +24,13 @@ async function handleRequest(req) {
   if (urlObj.searchParams.has("url")) {
     target = urlObj.searchParams.get("url");
   }
-  // Path style: /KEY/https://example.com
+  // Path style: /KEY/https://example.com/path
+  // We need to reconstruct the URL properly, not just join with "/"
   else if (pathSegments.length > 1) {
-    target = pathSegments.slice(1).join("/");
+    // Get everything after the key in the original path
+    const keyLength = `/${SECRET_KEY}/`.length;
+    const pathAfterKey = urlObj.pathname.substring(keyLength);
+    target = pathAfterKey;
   }
   
   if (!target) {
@@ -38,7 +42,7 @@ async function handleRequest(req) {
     target = "https://" + target;
   }
   
-  // Parse target URL to get the host
+  // Validate target URL
   let targetUrl;
   try {
     targetUrl = new URL(target);
@@ -46,14 +50,15 @@ async function handleRequest(req) {
     return new Response(`Invalid target URL: ${err.message}`, { status: 400 });
   }
   
-  // Clone headers and remove unsafe ones
+  // Clone headers and remove problematic ones
   const headers = new Headers(req.headers);
-  headers.delete("host");
+  // Remove headers that shouldn't be forwarded
+  headers.delete("host"); // Will be set automatically by fetch
   headers.delete("origin");
   headers.delete("referer");
-  
-  // Set the Host header to match the target domain (CRITICAL for Cloudflare)
-  headers.set("host", targetUrl.host);
+  headers.delete("cf-connecting-ip");
+  headers.delete("cf-ray");
+  headers.delete("cf-visitor");
   
   // Browser-like defaults
   if (!headers.has("user-agent")) {
@@ -68,23 +73,28 @@ async function handleRequest(req) {
       "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     );
   }
+  if (!headers.has("accept-language")) {
+    headers.set("accept-language", "en-US,en;q=0.9");
+  }
   
   let res;
   try {
-    res = await fetch(target, {
+    res = await fetch(targetUrl.toString(), {
       method: req.method,
       headers,
       body: ["GET", "HEAD"].includes(req.method) ? null : await req.text(),
       redirect: "follow"
     });
   } catch (err) {
-    return new Response(`Fetch failed: ${err.message}`, { status: 400 });
+    return new Response(`Fetch failed: ${err.message}`, { status: 502 });
   }
   
   // Forward headers + CORS
   const resHeaders = new Headers(res.headers);
   resHeaders.set("Access-Control-Allow-Origin", "*");
   resHeaders.set("Access-Control-Expose-Headers", "*");
+  resHeaders.delete("content-security-policy");
+  resHeaders.delete("x-frame-options");
   
   const body = await res.arrayBuffer();
   return new Response(body, {
