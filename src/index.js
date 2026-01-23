@@ -3,7 +3,7 @@ addEventListener("fetch", event => {
 })
 
 async function handleRequest(req) {
-  const SECRET_KEY = "mysecret123" // <-- change this to your secret key
+  const SECRET_KEY = "A53xR14L390" // <-- change this to your secret key
 
   const urlObj = new URL(req.url)
   const pathSegments = urlObj.pathname.split("/").filter(Boolean) // split path into segments
