@@ -3,8 +3,7 @@ addEventListener("fetch", event => {
 })
 
 async function handleRequest(req) {
-  // ==== CONFIG ====
-  const SECRET_KEY = "A53xR14L390" // <-- change this to your secret key
+  const SECRET_KEY = "mysecret123" // <-- change this to your secret key
 
   const urlObj = new URL(req.url)
   const pathSegments = urlObj.pathname.split("/").filter(Boolean) // split path into segments
@@ -15,55 +14,63 @@ async function handleRequest(req) {
   }
 
   // ==== DETERMINE TARGET URL ====
-  let targetUrl = null
+  let target = null
 
-  // 1️⃣ Query parameter style: /KEY/?url=https://example.com
+  // Query parameter style: ?url=https://example.com
   if (urlObj.searchParams.has("url")) {
-    targetUrl = urlObj.searchParams.get("url")
+    target = urlObj.searchParams.get("url")
   }
-  // 2️⃣ Path style: /KEY/https://example.com
+  // Path style: /KEY/https://example.com
   else if (pathSegments.length > 1) {
-    targetUrl = pathSegments.slice(1).join("/")
+    target = pathSegments.slice(1).join("/")
   }
 
-  // No target URL?
-  if (!targetUrl) {
-    return new Response("Missing target URL", { status: 400 })
-  }
+  if (!target) return new Response("Missing target URL", { status: 400 })
 
   // Auto-add https:// if missing
-  if (!/^https?:\/\//i.test(targetUrl)) {
-    targetUrl = "https://" + targetUrl
+  if (!/^https?:\/\//i.test(target)) target = "https://" + target
+
+  // Clone headers and remove unsafe ones
+  const headers = new Headers(req.headers)
+  headers.delete("host")
+  headers.delete("origin")
+  headers.delete("referer")
+
+  // Browser-like defaults
+  if (!headers.has("user-agent")) {
+    headers.set(
+      "user-agent",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+  }
+  if (!headers.has("accept")) {
+    headers.set(
+      "accept",
+      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    )
   }
 
+  let res
   try {
-    // ==== FORWARD REQUEST ====
-    const init = {
+    res = await fetch(target, {
       method: req.method,
-      headers: req.headers
-    }
-
-    // Include body if method allows
-    if (req.method !== "GET" && req.method !== "HEAD") {
-      init.body = await req.text()
-    }
-
-    const response = await fetch(targetUrl, init)
-
-    // ==== CLONE HEADERS + CORS ====
-    const newHeaders = new Headers(response.headers)
-    newHeaders.set("Access-Control-Allow-Origin", "*")
-    newHeaders.set("Access-Control-Allow-Methods", "*")
-    newHeaders.set("Access-Control-Allow-Headers", "*")
-
-    const body = await response.arrayBuffer()
-
-    return new Response(body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: newHeaders
+      headers,
+      body: ["GET", "HEAD"].includes(req.method) ? null : await req.text(),
+      redirect: "follow"
     })
   } catch (err) {
-    return new Response("Error fetching target URL: " + err.message, { status: 502 })
+    return new Response("Invalid target URL or fetch failed", { status: 400 })
   }
+
+  // Forward headers + CORS
+  const resHeaders = new Headers(res.headers)
+  resHeaders.set("Access-Control-Allow-Origin", "*")
+  resHeaders.set("Access-Control-Expose-Headers", "*")
+
+  const body = await res.arrayBuffer()
+  return new Response(body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: resHeaders
+  })
 }
