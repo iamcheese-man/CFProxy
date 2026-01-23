@@ -7,11 +7,10 @@ async function handleRequest(req) {
 
   const urlObj = new URL(req.url);
   const pathSegments = urlObj.pathname.split("/").filter(Boolean); // split path
-
-  // ==== ENFORCE SECRET KEY ====
-  if (pathSegments.length === 0 || pathSegments[0] !== SECRET_KEY) {
+// ==== ENFORCE SECRET KEY STRICTLY ====
+if (!pathSegments[0] || pathSegments[0] !== SECRET_KEY) {
     return new Response("Unauthorized: invalid key", { status: 401 });
-  }
+}
 
   // ==== DETERMINE TARGET URL ====
   let target = null;
