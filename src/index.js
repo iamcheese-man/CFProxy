@@ -8,33 +8,48 @@ async function handleRequest(req) {
   const urlObj = new URL(req.url);
   const pathSegments = urlObj.pathname.split("/").filter(Boolean);
   
+  // Handle OPTIONS preflight for CORS
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Max-Age": "86400",
+      }
+    });
+  }
+  
   // ==== ENFORCE KEY ====
   if (pathSegments.length < 1) {
-    return new Response("Unauthorized: key missing", { status: 401 });
+    return jsonError("Unauthorized: key missing", 401);
   }
   
   if (pathSegments[0] !== SECRET_KEY) {
-    return new Response("Unauthorized: invalid key", { status: 401 });
+    return jsonError("Unauthorized: invalid key", 401);
   }
   
   // ==== DETERMINE TARGET URL ====
   let target = null;
   
-  // Query parameter style
+  // Query parameter style: /KEY?url=https://example.com
   if (urlObj.searchParams.has("url")) {
     target = urlObj.searchParams.get("url");
   }
   // Path style: /KEY/https://example.com/path
-  // We need to reconstruct the URL properly, not just join with "/"
   else if (pathSegments.length > 1) {
-    // Get everything after the key in the original path
     const keyLength = `/${SECRET_KEY}/`.length;
     const pathAfterKey = urlObj.pathname.substring(keyLength);
     target = pathAfterKey;
+    
+    // Preserve query parameters from original request
+    if (urlObj.search && !target.includes("?")) {
+      target += urlObj.search;
+    }
   }
   
   if (!target) {
-    return new Response("Missing target URL", { status: 400 });
+    return jsonError("Missing target URL. Usage: /{key}/{url} or /{key}?url={url}", 400);
   }
   
   // Auto-add https:// if missing
@@ -47,34 +62,59 @@ async function handleRequest(req) {
   try {
     targetUrl = new URL(target);
   } catch (err) {
-    return new Response(`Invalid target URL: ${err.message}`, { status: 400 });
+    return jsonError(`Invalid target URL: ${err.message}`, 400);
+  }
+  
+  // Security: Block access to private/local IPs
+  const hostname = targetUrl.hostname;
+  if (
+    hostname === "localhost" ||
+    hostname.startsWith("127.") ||
+    hostname.startsWith("192.168.") ||
+    hostname.startsWith("10.") ||
+    hostname.startsWith("172.16.") ||
+    hostname === "0.0.0.0" ||
+    hostname === "[::]"
+  ) {
+    return jsonError("Access to private/local addresses is not allowed", 403);
   }
   
   // Clone headers and remove problematic ones
   const headers = new Headers(req.headers);
-  // Remove headers that shouldn't be forwarded
-  headers.delete("host"); // Will be set automatically by fetch
-  headers.delete("origin");
-  headers.delete("referer");
-  headers.delete("cf-connecting-ip");
-  headers.delete("cf-ray");
-  headers.delete("cf-visitor");
+  const headersToRemove = [
+    "host", "origin", "referer",
+    "cf-connecting-ip", "cf-ray", "cf-visitor", "cf-ipcountry",
+    "x-forwarded-for", "x-forwarded-proto", "x-real-ip"
+  ];
+  headersToRemove.forEach(h => headers.delete(h));
   
   // Browser-like defaults
   if (!headers.has("user-agent")) {
-    headers.set(
-      "user-agent",
+    headers.set("user-agent", 
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     );
   }
   if (!headers.has("accept")) {
-    headers.set(
-      "accept",
-      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    );
+    headers.set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8");
   }
   if (!headers.has("accept-language")) {
     headers.set("accept-language", "en-US,en;q=0.9");
+  }
+  if (!headers.has("accept-encoding")) {
+    headers.set("accept-encoding", "gzip, deflate, br");
+  }
+  
+  // Handle request body for non-GET/HEAD requests
+  let body = null;
+  if (!["GET", "HEAD"].includes(req.method)) {
+    const contentType = req.headers.get("content-type");
+    if (contentType && contentType.includes("application/json")) {
+      body = await req.text();
+    } else if (contentType && contentType.includes("multipart/form-data")) {
+      body = await req.arrayBuffer();
+    } else {
+      body = await req.text();
+    }
   }
   
   let res;
@@ -82,24 +122,48 @@ async function handleRequest(req) {
     res = await fetch(targetUrl.toString(), {
       method: req.method,
       headers,
-      body: ["GET", "HEAD"].includes(req.method) ? null : await req.text(),
-      redirect: "follow"
+      body,
+      redirect: "follow",
+      // Add timeout protection (Cloudflare Workers have 50s CPU time limit)
+      signal: AbortSignal.timeout(30000) // 30 second timeout
     });
   } catch (err) {
-    return new Response(`Fetch failed: ${err.message}`, { status: 502 });
+    if (err.name === "TimeoutError") {
+      return jsonError("Request timeout: target server took too long to respond", 504);
+    }
+    return jsonError(`Fetch failed: ${err.message}`, 502);
   }
   
   // Forward headers + CORS
   const resHeaders = new Headers(res.headers);
   resHeaders.set("Access-Control-Allow-Origin", "*");
+  resHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH");
+  resHeaders.set("Access-Control-Allow-Headers", "*");
   resHeaders.set("Access-Control-Expose-Headers", "*");
+  
+  // Remove security headers that might cause issues
   resHeaders.delete("content-security-policy");
   resHeaders.delete("x-frame-options");
+  resHeaders.delete("x-content-type-options");
   
-  const body = await res.arrayBuffer();
-  return new Response(body, {
+  // Add proxy identification header
+  resHeaders.set("X-Proxied-By", "Cloudflare-Workers-Proxy");
+  
+  const responseBody = await res.arrayBuffer();
+  return new Response(responseBody, {
     status: res.status,
     statusText: res.statusText,
     headers: resHeaders
+  });
+}
+
+// Helper function for JSON error responses
+function jsonError(message, status) {
+  return new Response(JSON.stringify({ error: message, status }), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    }
   });
 }
