@@ -2,13 +2,13 @@ addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request));
 });
 
-const SECRET_KEY = "A53xR14L390"; // change this to your secret key
+const SECRET_KEY = "A53xR14L390"; // move to env var in prod
 
 async function handleRequest(req) {
   const urlObj = new URL(req.url);
   const pathSegments = urlObj.pathname.split("/").filter(Boolean);
-  
-  // Handle OPTIONS preflight for CORS
+
+  // ===== CORS PREFLIGHT =====
   if (req.method === "OPTIONS") {
     return new Response(null, {
       headers: {
@@ -19,104 +19,99 @@ async function handleRequest(req) {
       }
     });
   }
-  
-  // ==== ENFORCE KEY ====
-  if (pathSegments.length < 1) {
-    return jsonError("Unauthorized: key missing", 401);
+
+  // ===== AUTH =====
+  if (pathSegments.length < 1 || pathSegments[0] !== SECRET_KEY) {
+    return jsonError("Unauthorized", 401);
   }
-  
-  if (pathSegments[0] !== SECRET_KEY) {
-    return jsonError("Unauthorized: invalid key", 401);
-  }
-  
-  // ==== DETERMINE TARGET URL ====
-  let target = null;
-  
-  // Query parameter style: /KEY?url=https://example.com
+
+  // ===== TARGET URL =====
+  let target;
+
   if (urlObj.searchParams.has("url")) {
     target = urlObj.searchParams.get("url");
-  }
-  // Path style: /KEY/https://example.com/path
-  else if (pathSegments.length > 1) {
+  } else if (pathSegments.length > 1) {
     const keyLength = `/${SECRET_KEY}/`.length;
-    const pathAfterKey = urlObj.pathname.substring(keyLength);
-    target = pathAfterKey;
-    
-    // Preserve query parameters from original request
-    if (urlObj.search && !target.includes("?")) {
-      target += urlObj.search;
-    }
+    target = urlObj.pathname.substring(keyLength) + urlObj.search;
   }
-  
+
   if (!target) {
-    return jsonError("Missing target URL. Usage: /{key}/{url} or /{key}?url={url}", 400);
+    return jsonError("Missing target URL", 400);
   }
-  
-  // Auto-add https:// if missing
+
   if (!/^https?:\/\//i.test(target)) {
     target = "https://" + target;
   }
-  
-  // Validate target URL
+
   let targetUrl;
   try {
     targetUrl = new URL(target);
-  } catch (err) {
-    return jsonError(`Invalid target URL: ${err.message}`, 400);
+  } catch {
+    return jsonError("Invalid target URL", 400);
   }
-  
-  // Security: Block access to private/local IPs
+
+  // ===== BLOCK PRIVATE / LOCAL =====
   const hostname = targetUrl.hostname;
   if (
     hostname === "localhost" ||
     hostname.startsWith("127.") ||
-    hostname.startsWith("192.168.") ||
     hostname.startsWith("10.") ||
+    hostname.startsWith("192.168.") ||
     hostname.startsWith("172.16.") ||
     hostname === "0.0.0.0" ||
     hostname === "[::]"
   ) {
-    return jsonError("Access to private/local addresses is not allowed", 403);
+    return jsonError("Private targets blocked", 403);
   }
-  
-  // Clone headers and remove problematic ones
-  const headers = new Headers(req.headers);
-  const headersToRemove = [
-    "host", "origin", "referer",
-    "cf-connecting-ip", "cf-ray", "cf-visitor", "cf-ipcountry",
-    "x-forwarded-for", "x-forwarded-proto", "x-real-ip"
-  ];
-  headersToRemove.forEach(h => headers.delete(h));
-  
-  // Browser-like defaults
-  if (!headers.has("user-agent")) {
-    headers.set("user-agent", 
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    );
-  }
-  if (!headers.has("accept")) {
-    headers.set("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8");
-  }
-  if (!headers.has("accept-language")) {
-    headers.set("accept-language", "en-US,en;q=0.9");
-  }
-  if (!headers.has("accept-encoding")) {
-    headers.set("accept-encoding", "gzip, deflate, br");
-  }
-  
-  // Handle request body for non-GET/HEAD requests
-  let body = null;
-  if (!["GET", "HEAD"].includes(req.method)) {
-    const contentType = req.headers.get("content-type");
-    if (contentType && contentType.includes("application/json")) {
-      body = await req.text();
-    } else if (contentType && contentType.includes("multipart/form-data")) {
-      body = await req.arrayBuffer();
-    } else {
-      body = await req.text();
+
+  // ===== HEADERS =====
+  const headers = new Headers();
+
+  // Copy safe headers only
+  for (const [key, value] of req.headers.entries()) {
+    if (
+      ![
+        "host",
+        "origin",
+        "referer",
+        "x-forwarded-for",
+        "x-real-ip",
+        "cf-connecting-ip",
+        "cf-ray",
+        "cf-visitor",
+        "cf-ipcountry"
+      ].includes(key.toLowerCase())
+    ) {
+      headers.set(key, value);
     }
   }
-  
+
+  // ✅ Forward Cloudflare-verified client IP ONLY
+  const clientIP = req.headers.get("cf-connecting-ip");
+  if (clientIP) {
+    headers.set("cf-connecting-ip", clientIP);
+    headers.set("x-forwarded-for", clientIP);
+  }
+
+  // Browser-like defaults
+  headers.set(
+    "user-agent",
+    headers.get("user-agent") ||
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+  );
+  headers.set(
+    "accept",
+    headers.get("accept") ||
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+  );
+
+  // ===== BODY =====
+  let body = null;
+  if (!["GET", "HEAD"].includes(req.method)) {
+    body = await req.arrayBuffer();
+  }
+
+  // ===== FETCH =====
   let res;
   try {
     res = await fetch(targetUrl.toString(), {
@@ -124,42 +119,32 @@ async function handleRequest(req) {
       headers,
       body,
       redirect: "follow",
-      // Add timeout protection (Cloudflare Workers have 50s CPU time limit)
-      signal: AbortSignal.timeout(30000) // 30 second timeout
+      signal: AbortSignal.timeout(30000)
     });
   } catch (err) {
-    if (err.name === "TimeoutError") {
-      return jsonError("Request timeout: target server took too long to respond", 504);
-    }
     return jsonError(`Fetch failed: ${err.message}`, 502);
   }
-  
-  // Forward headers + CORS
+
+  // ===== RESPONSE =====
   const resHeaders = new Headers(res.headers);
   resHeaders.set("Access-Control-Allow-Origin", "*");
-  resHeaders.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, HEAD, PATCH");
   resHeaders.set("Access-Control-Allow-Headers", "*");
   resHeaders.set("Access-Control-Expose-Headers", "*");
-  
-  // Remove security headers that might cause issues
+  resHeaders.set("X-Proxied-By", "Cloudflare-Worker");
+
+  // Remove headers that break browsers
   resHeaders.delete("content-security-policy");
   resHeaders.delete("x-frame-options");
   resHeaders.delete("x-content-type-options");
-  
-  // Add proxy identification header
-  resHeaders.set("X-Proxied-By", "Cloudflare-Workers-Proxy");
-  
-  const responseBody = await res.arrayBuffer();
-  return new Response(responseBody, {
+
+  return new Response(await res.arrayBuffer(), {
     status: res.status,
-    statusText: res.statusText,
     headers: resHeaders
   });
 }
 
-// Helper function for JSON error responses
 function jsonError(message, status) {
-  return new Response(JSON.stringify({ error: message, status }), {
+  return new Response(JSON.stringify({ error: message }), {
     status,
     headers: {
       "Content-Type": "application/json",
