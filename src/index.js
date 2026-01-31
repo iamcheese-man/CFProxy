@@ -77,17 +77,13 @@ async function handleRequest(req) {
     }
   }
 
-  // ✅ Forward Cloudflare-verified client IP
   const clientIP = req.headers.get("cf-connecting-ip");
   if (clientIP) {
     headers.set("cf-connecting-ip", clientIP);
     headers.set("x-forwarded-for", clientIP);
   }
 
-  // ✅ Force the correct Host header (avoids Cloudflare 1003)
   headers.set("host", targetUrl.host);
-
-  // Default browser headers if missing
   headers.set(
     "user-agent",
     headers.get("user-agent") ||
@@ -98,10 +94,18 @@ async function handleRequest(req) {
     headers.get("accept") || "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
   );
 
-  // ===== Handle body =====
   let body = null;
   if (!["GET", "HEAD"].includes(req.method)) {
     body = await req.arrayBuffer();
+  }
+
+  // ===== Cache lookup for GET requests =====
+  const cache = caches.default;
+  if (req.method === "GET") {
+    const cachedResponse = await cache.match(req);
+    if (cachedResponse) {
+      return cachedResponse;
+    }
   }
 
   // ===== Fetch target =====
@@ -125,16 +129,22 @@ async function handleRequest(req) {
   resHeaders.set("Access-Control-Expose-Headers", "*");
   resHeaders.set("X-Proxied-By", "Cloudflare Worker");
 
-  // Remove headers that might break browser rendering
   resHeaders.delete("content-security-policy");
   resHeaders.delete("x-frame-options");
   resHeaders.delete("x-content-type-options");
 
-  return new Response(await res.arrayBuffer(), {
+  const finalResponse = new Response(await res.arrayBuffer(), {
     status: res.status,
     statusText: res.statusText,
     headers: resHeaders,
   });
+
+  // ===== Cache successful GET responses =====
+  if (req.method === "GET" && res.status >= 200 && res.status < 300) {
+    event.waitUntil(cache.put(req, finalResponse.clone()));
+  }
+
+  return finalResponse;
 }
 
 // ===== Helper: JSON error =====
