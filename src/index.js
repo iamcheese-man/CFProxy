@@ -1,12 +1,34 @@
 addEventListener("fetch", event => {
-  event.respondWith(handleRequest(event.request));
+  event.respondWith(handleRequest(event.request, event));
 });
 
-const SECRET_KEY = "A53xR14L390"; // use an env var in production
+const SECRET_KEY = "A53xR14L390"; // use an environment variable in production
+const RATE_LIMIT = 61;
+const RATE_WINDOW = 60 * 1000; // 60 seconds
 
-async function handleRequest(req) {
-  const urlObj = new URL(req.url);
-  const pathSegments = urlObj.pathname.split("/").filter(Boolean);
+async function handleRequest(req, event) {
+  // ===== Rate limiting =====
+  const clientIP = req.headers.get("cf-connecting-ip") || "unknown";
+  const cacheKey = `ratelimit:${clientIP}`;
+  const now = Date.now();
+  const cache = caches.default;
+
+  const data = await cache.match(cacheKey);
+  let state = data ? await data.json() : { count: 0, start: now };
+
+  if (now - state.start > RATE_WINDOW) {
+    state.count = 1;
+    state.start = now;
+  } else {
+    state.count++;
+  }
+
+  if (state.count > RATE_LIMIT) {
+    return jsonError("Rate limit exceeded (61 requests per minute)", 429);
+  }
+
+  const resp = new Response(JSON.stringify(state), { status: 200 });
+  event.waitUntil(cache.put(cacheKey, resp, { expirationTtl: 60 }));
 
   // ===== CORS preflight =====
   if (req.method === "OPTIONS") {
@@ -21,6 +43,9 @@ async function handleRequest(req) {
   }
 
   // ===== Secret key check =====
+  const urlObj = new URL(req.url);
+  const pathSegments = urlObj.pathname.split("/").filter(Boolean);
+
   if (pathSegments.length < 1 || pathSegments[0] !== SECRET_KEY) {
     return jsonError("Unauthorized: invalid or missing key", 401);
   }
@@ -77,7 +102,6 @@ async function handleRequest(req) {
     }
   }
 
-  const clientIP = req.headers.get("cf-connecting-ip");
   if (clientIP) {
     headers.set("cf-connecting-ip", clientIP);
     headers.set("x-forwarded-for", clientIP);
@@ -94,14 +118,13 @@ async function handleRequest(req) {
     headers.get("accept") || "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
   );
 
-  // ===== Handle body =====
+  // ===== Handle request body =====
   let body = null;
   if (!["GET", "HEAD"].includes(req.method)) {
     body = await req.arrayBuffer();
   }
 
   // ===== Cache lookup for GET requests =====
-  const cache = caches.default;
   if (req.method === "GET") {
     const cachedResponse = await cache.match(req);
     if (cachedResponse) return cachedResponse;
@@ -128,12 +151,11 @@ async function handleRequest(req) {
   resHeaders.set("Access-Control-Expose-Headers", "*");
   resHeaders.set("X-Proxied-By", "Cloudflare Worker");
 
-  // Remove headers that might break browser rendering
+  // Remove headers that may break browser rendering
   resHeaders.delete("content-security-policy");
   resHeaders.delete("x-frame-options");
   resHeaders.delete("x-content-type-options");
 
-  // ===== STREAM response instead of buffering =====
   const finalResponse = new Response(res.body, {
     status: res.status,
     statusText: res.statusText,
