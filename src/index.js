@@ -94,6 +94,7 @@ async function handleRequest(req) {
     headers.get("accept") || "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
   );
 
+  // ===== Handle body =====
   let body = null;
   if (!["GET", "HEAD"].includes(req.method)) {
     body = await req.arrayBuffer();
@@ -103,9 +104,7 @@ async function handleRequest(req) {
   const cache = caches.default;
   if (req.method === "GET") {
     const cachedResponse = await cache.match(req);
-    if (cachedResponse) {
-      return cachedResponse;
-    }
+    if (cachedResponse) return cachedResponse;
   }
 
   // ===== Fetch target =====
@@ -129,11 +128,13 @@ async function handleRequest(req) {
   resHeaders.set("Access-Control-Expose-Headers", "*");
   resHeaders.set("X-Proxied-By", "Cloudflare Worker");
 
+  // Remove headers that might break browser rendering
   resHeaders.delete("content-security-policy");
   resHeaders.delete("x-frame-options");
   resHeaders.delete("x-content-type-options");
 
-  const finalResponse = new Response(await res.arrayBuffer(), {
+  // ===== STREAM response instead of buffering =====
+  const finalResponse = new Response(res.body, {
     status: res.status,
     statusText: res.statusText,
     headers: resHeaders,
