@@ -42,21 +42,33 @@ async function handleRequest(req, event) {
     });
   }
 
-  // ===== Secret key check =====
-  const urlObj = new URL(req.url);
-  const pathSegments = urlObj.pathname.split("/").filter(Boolean);
-
-  if (pathSegments.length < 1 || pathSegments[0] !== SECRET_KEY) {
-    return jsonError("Unauthorized: invalid or missing key", 401);
+  // ===== Check authentication header =====
+  const authHeader = req.headers.get("X-CFProxy-Auth");
+  
+  if (!authHeader || authHeader !== SECRET_KEY) {
+    // If it's a GET request without auth, return HTML password form
+    if (req.method === "GET") {
+      return new Response(getPasswordHTML(), {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+    // For other methods, return unauthorized error
+    return jsonError("Unauthorized: missing or invalid X-CFProxy-Auth header", 401);
   }
 
   // ===== Determine target URL =====
+  const urlObj = new URL(req.url);
   let target;
+  
   if (urlObj.searchParams.has("url")) {
     target = urlObj.searchParams.get("url");
-  } else if (pathSegments.length > 1) {
-    const keyLength = `/${SECRET_KEY}/`.length;
-    target = urlObj.pathname.substring(keyLength) + urlObj.search;
+  } else {
+    // Use the path as the target URL
+    target = urlObj.pathname.substring(1) + urlObj.search; // Remove leading /
   }
 
   if (!target) return jsonError("Missing target URL", 400);
@@ -84,7 +96,7 @@ async function handleRequest(req, event) {
     return jsonError("Private/local addresses are blocked", 403);
   }
 
-  // ===== Build headers =====
+  // ===== Build headers (strip X-CFProxy-Auth) =====
   const headers = new Headers();
   for (const [key, value] of req.headers.entries()) {
     if (![
@@ -96,7 +108,8 @@ async function handleRequest(req, event) {
       "cf-connecting-ip",
       "cf-ray",
       "cf-visitor",
-      "cf-ipcountry"
+      "cf-ipcountry",
+      "x-cfproxy-auth" // Strip the auth header
     ].includes(key.toLowerCase())) {
       headers.set(key, value);
     }
@@ -179,4 +192,214 @@ function jsonError(message, status = 400) {
       "Access-Control-Allow-Origin": "*",
     },
   });
+}
+
+// ===== Helper: Password input HTML =====
+function getPasswordHTML() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloudflare Proxy - Authentication Required</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 28px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    .form-group {
+      margin-bottom: 20px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #333;
+      font-weight: 500;
+      font-size: 14px;
+    }
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 12px 16px;
+      border: 2px solid #e0e0e0;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.3s;
+    }
+    input[type="text"]:focus,
+    input[type="password"]:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+    }
+    button:active {
+      transform: translateY(0);
+    }
+    .error {
+      background: #fee;
+      border: 1px solid #fcc;
+      color: #c33;
+      padding: 12px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: none;
+    }
+    .info {
+      background: #e3f2fd;
+      border: 1px solid #90caf9;
+      color: #1976d2;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 20px;
+      font-size: 13px;
+    }
+    .code {
+      background: #f5f5f5;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔒 Proxy Authentication</h1>
+    <p class="subtitle">Enter your credentials to access the proxy service</p>
+    
+    <div id="error" class="error"></div>
+    
+    <form id="proxyForm">
+      <div class="form-group">
+        <label for="url">Target URL</label>
+        <input 
+          type="text" 
+          id="url" 
+          name="url" 
+          placeholder="https://example.com"
+          required
+        />
+      </div>
+      
+      <div class="form-group">
+        <label for="password">Proxy Password</label>
+        <input 
+          type="password" 
+          id="password" 
+          name="password" 
+          placeholder="Enter your proxy password"
+          required
+        />
+      </div>
+      
+      <button type="submit">Access URL</button>
+    </form>
+    
+    <div class="info">
+      <strong>API Usage:</strong> Add <span class="code">X-CFProxy-Auth</span> header with your password to programmatically access this proxy.
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('proxyForm');
+    const errorDiv = document.getElementById('error');
+    const urlInput = document.getElementById('url');
+    const passwordInput = document.getElementById('password');
+
+    // Pre-fill URL from query parameter if present
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('url')) {
+      urlInput.value = params.get('url');
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorDiv.style.display = 'none';
+      
+      const url = urlInput.value.trim();
+      const password = passwordInput.value;
+      
+      if (!url) {
+        showError('Please enter a target URL');
+        return;
+      }
+      
+      if (!password) {
+        showError('Please enter your proxy password');
+        return;
+      }
+      
+      try {
+        // Make request with auth header
+        const proxyUrl = window.location.origin + '/' + url;
+        const response = await fetch(proxyUrl, {
+          method: 'GET',
+          headers: {
+            'X-CFProxy-Auth': password
+          }
+        });
+        
+        if (response.ok) {
+          // Redirect to the proxied content
+          window.location.href = proxyUrl + '?auth=' + encodeURIComponent(password);
+        } else {
+          const data = await response.json().catch(() => ({}));
+          showError(data.error || 'Authentication failed. Please check your password.');
+        }
+      } catch (err) {
+        showError('Request failed: ' + err.message);
+      }
+    });
+    
+    function showError(message) {
+      errorDiv.textContent = message;
+      errorDiv.style.display = 'block';
+    }
+  </script>
+</body>
+</html>`;
 }
