@@ -6,6 +6,9 @@ const SECRET_KEY = "A53xR14L390"; // use an environment variable in production
 const RATE_LIMIT = 61;
 const RATE_WINDOW = 60 * 1000; // 60 seconds
 
+// In-memory token store (resets on worker restart, suitable for short-lived tokens)
+const validTokens = new Map();
+
 async function handleRequest(req, event) {
   // ===== Rate limiting =====
   const clientIP = req.headers.get("cf-connecting-ip") || "unknown";
@@ -47,10 +50,59 @@ async function handleRequest(req, event) {
     });
   }
 
-  // ===== Check authentication header =====
-  const authHeader = req.headers.get("X-CFProxy-Auth");
+  const urlObj = new URL(req.url);
   
-  if (!authHeader || authHeader !== SECRET_KEY) {
+  // ===== Token generation endpoint =====
+  if (urlObj.pathname === '/_generate_token' && req.method === 'POST') {
+    const body = await req.json().catch(() => ({}));
+    const password = body.password || req.headers.get("X-CFProxy-Auth");
+    
+    if (password !== SECRET_KEY) {
+      return jsonError("Invalid password", 401);
+    }
+    
+    // Generate a random token
+    const token = generateToken();
+    const expiresAt = Date.now() + (5 * 60 * 1000); // 5 minutes
+    
+    validTokens.set(token, expiresAt);
+    
+    // Clean up expired tokens
+    for (const [t, exp] of validTokens.entries()) {
+      if (Date.now() > exp) {
+        validTokens.delete(t);
+      }
+    }
+    
+    return new Response(JSON.stringify({ token, expiresIn: 300 }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  // ===== Check authentication (header or token) =====
+  const authHeader = req.headers.get("X-CFProxy-Auth");
+  const tokenParam = urlObj.searchParams.get("_token");
+  
+  let isAuthenticated = false;
+  
+  // Check header auth
+  if (authHeader === SECRET_KEY) {
+    isAuthenticated = true;
+  }
+  
+  // Check token auth
+  if (!isAuthenticated && tokenParam) {
+    const tokenExpiry = validTokens.get(tokenParam);
+    if (tokenExpiry && Date.now() < tokenExpiry) {
+      isAuthenticated = true;
+    }
+  }
+  
+  if (!isAuthenticated) {
     // If it's a GET request without auth, return HTML password form
     if (req.method === "GET") {
       return new Response(getPasswordHTML(), {
@@ -62,18 +114,23 @@ async function handleRequest(req, event) {
       });
     }
     // For other methods, return unauthorized error
-    return jsonError("Unauthorized: missing or invalid X-CFProxy-Auth header", 401);
+    return jsonError("Unauthorized: missing or invalid authentication", 401);
   }
 
+  // Remove token from URL before processing
+  urlObj.searchParams.delete("_token");
+
   // ===== Determine target URL =====
-  const urlObj = new URL(req.url);
   let target;
   
   if (urlObj.searchParams.has("url")) {
     target = urlObj.searchParams.get("url");
   } else {
     // Use the path as the target URL
-    target = urlObj.pathname.substring(1) + urlObj.search; // Remove leading /
+    const path = urlObj.pathname.substring(1); // Remove leading /
+    if (path) {
+      target = path + urlObj.search;
+    }
   }
 
   if (!target) return jsonError("Missing target URL", 400);
@@ -197,6 +254,16 @@ function jsonError(message, status = 400) {
       "Access-Control-Allow-Origin": "*",
     },
   });
+}
+
+// ===== Helper: Generate random token =====
+function generateToken() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let token = '';
+  for (let i = 0; i < 32; i++) {
+    token += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return token;
 }
 
 // ===== Helper: Password input HTML =====
@@ -365,7 +432,7 @@ function getPasswordHTML() {
       e.preventDefault();
       errorDiv.style.display = 'none';
       
-      const url = urlInput.value.trim();
+      let url = urlInput.value.trim();
       const password = passwordInput.value;
       
       if (!url) {
@@ -378,23 +445,36 @@ function getPasswordHTML() {
         return;
       }
       
+      // Add https:// if no protocol specified
+      if (!/^https?:\/\//i.test(url)) {
+        url = 'https://' + url;
+      }
+      
       try {
-        // Make request with auth header
-        const proxyUrl = window.location.origin + '/' + url;
-        const response = await fetch(proxyUrl, {
-          method: 'GET',
+        // Validate URL
+        new URL(url);
+        
+        // Generate a temporary token
+        const tokenResponse = await fetch(window.location.origin + '/_generate_token', {
+          method: 'POST',
           headers: {
-            'X-CFProxy-Auth': password
-          }
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ password })
         });
         
-        if (response.ok) {
-          // Redirect to the proxied content
-          window.location.href = proxyUrl + '?auth=' + encodeURIComponent(password);
-        } else {
-          const data = await response.json().catch(() => ({}));
-          showError(data.error || 'Authentication failed. Please check your password.');
+        if (!tokenResponse.ok) {
+          const data = await tokenResponse.json().catch(() => ({}));
+          showError(data.error || 'Invalid password');
+          return;
         }
+        
+        const { token } = await tokenResponse.json();
+        
+        // Redirect to proxied URL with token
+        const proxyUrl = window.location.origin + '/' + url + '?_token=' + encodeURIComponent(token);
+        window.location.href = proxyUrl;
+        
       } catch (err) {
         showError('Request failed: ' + err.message);
       }
