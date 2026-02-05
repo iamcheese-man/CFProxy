@@ -9,12 +9,12 @@ const RATE_WINDOW = 60 * 1000; // 60 seconds
 async function handleRequest(req, event) {
   // ===== Rate limiting =====
   const clientIP = req.headers.get("cf-connecting-ip") || "unknown";
-  const cacheKey = `ratelimit:${clientIP}`;
+  const cacheKey = new Request(`https://ratelimit.internal/${clientIP}`);
   const now = Date.now();
   const cache = caches.default;
 
-  const data = await cache.match(cacheKey);
-  let state = data ? await data.json() : { count: 0, start: now };
+  const cachedResp = await cache.match(cacheKey);
+  let state = cachedResp ? await cachedResp.json() : { count: 0, start: now };
 
   if (now - state.start > RATE_WINDOW) {
     state.count = 1;
@@ -27,8 +27,13 @@ async function handleRequest(req, event) {
     return jsonError("Rate limit exceeded (61 requests per minute)", 429);
   }
 
-  const resp = new Response(JSON.stringify(state), { status: 200 });
-  event.waitUntil(cache.put(cacheKey, resp, { expirationTtl: 60 }));
+  const stateResp = new Response(JSON.stringify(state), { 
+    status: 200,
+    headers: {
+      "Cache-Control": "max-age=60"
+    }
+  });
+  event.waitUntil(cache.put(cacheKey, stateResp.clone()));
 
   // ===== CORS preflight =====
   if (req.method === "OPTIONS") {
