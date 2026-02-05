@@ -128,8 +128,13 @@ async function handleRequest(req, event) {
   } else {
     // Use the path as the target URL
     const path = urlObj.pathname.substring(1); // Remove leading /
-    if (path) {
-      target = path + urlObj.search;
+    if (path && path !== '_generate_token') {
+      target = path;
+      // Add back the search params (without _token)
+      const searchStr = urlObj.search.replace(/[?&]_token=[^&]*/, '').replace(/^&/, '?');
+      if (searchStr && searchStr !== '?') {
+        target += searchStr;
+      }
     }
   }
 
@@ -471,8 +476,8 @@ function getPasswordHTML() {
         
         const { token } = await tokenResponse.json();
         
-        // Redirect to proxied URL with token
-        const proxyUrl = window.location.origin + '/' + url + '?_token=' + encodeURIComponent(token);
+        // Redirect to proxied URL with token - use query parameter method for clarity
+        const proxyUrl = window.location.origin + '/?url=' + encodeURIComponent(url) + '&_token=' + encodeURIComponent(token);
         window.location.href = proxyUrl;
         
       } catch (err) {
