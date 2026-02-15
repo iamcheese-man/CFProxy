@@ -4,8 +4,8 @@ addEventListener("fetch", event => {
 
 const RATE_LIMIT = 61;
 const RATE_WINDOW = 60 * 1000; // 60 seconds
-const IP_CHECK_URL = "https://publichomeip.duckdns.org";
-const IP_CACHE_TTL = 300; // Cache the allowed IP for 5 minutes
+const ALLOWED_IP_HOSTNAME = "publichomeip.duckdns.org";
+const IP_CACHE_TTL = 300; // Cache DNS result for 5 minutes
 
 // Cache for the allowed IP
 let allowedIPCache = null;
@@ -56,11 +56,29 @@ async function handleRequest(req, event) {
 
   const urlObj = new URL(req.url);
   
+  // ===== Debug endpoint to check allowed IP =====
+  if (urlObj.pathname === '/_debug_ip') {
+    const allowedIP = await getAllowedIPViaDNS();
+    return new Response(JSON.stringify({
+      yourIP: clientIP,
+      allowedIP: allowedIP,
+      hostname: ALLOWED_IP_HOSTNAME,
+      match: clientIP === allowedIP,
+      cacheAge: allowedIPCacheTime ? Math.floor((Date.now() - allowedIPCacheTime) / 1000) : null,
+    }, null, 2), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+  
   // ===== Check IP Authorization =====
-  const allowedIP = await getAllowedIP();
+  const allowedIP = await getAllowedIPViaDNS();
   
   if (!allowedIP) {
-    return jsonError("Unable to verify allowed IP from publichomeip.duckdns.org", 503);
+    return jsonError(`Unable to resolve ${ALLOWED_IP_HOSTNAME} via DNS`, 503);
   }
   
   if (clientIP !== allowedIP) {
@@ -97,7 +115,7 @@ async function handleRequest(req, event) {
   if (!target) {
     // Show welcome page
     if (req.method === "GET") {
-      return new Response(getWelcomeHTML(clientIP), {
+      return new Response(getWelcomeHTML(clientIP, allowedIP), {
         status: 200,
         headers: {
           "Content-Type": "text/html",
@@ -218,8 +236,8 @@ async function handleRequest(req, event) {
   return finalResponse;
 }
 
-// ===== Get allowed IP from publichomeip.duckdns.org =====
-async function getAllowedIP() {
+// ===== Resolve IP via DNS (using Cloudflare DNS over HTTPS) =====
+async function getAllowedIPViaDNS() {
   const now = Date.now();
   
   // Return cached IP if still valid
@@ -228,28 +246,46 @@ async function getAllowedIP() {
   }
   
   try {
-    const response = await fetch(IP_CHECK_URL, {
+    // Use Cloudflare's DNS-over-HTTPS API
+    const dnsUrl = `https://cloudflare-dns.com/dns-query?name=${ALLOWED_IP_HOSTNAME}&type=A`;
+    
+    const response = await fetch(dnsUrl, {
+      headers: {
+        'Accept': 'application/dns-json'
+      },
       signal: AbortSignal.timeout(5000),
     });
     
     if (!response.ok) {
-      console.error(`Failed to fetch allowed IP: ${response.status}`);
+      console.error(`DNS query failed: ${response.status}`);
       return allowedIPCache; // Return cached IP if available
     }
     
-    const ip = (await response.text()).trim();
+    const dnsData = await response.json();
     
-    // Validate IP format (simple check)
-    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
-      allowedIPCache = ip;
-      allowedIPCacheTime = now;
-      return ip;
-    } else {
-      console.error(`Invalid IP format received: ${ip}`);
-      return allowedIPCache;
+    // Check if we got a valid answer
+    if (dnsData.Answer && dnsData.Answer.length > 0) {
+      // Get the first A record
+      const aRecord = dnsData.Answer.find(record => record.type === 1); // Type 1 = A record
+      
+      if (aRecord && aRecord.data) {
+        const ip = aRecord.data;
+        
+        // Validate IP format
+        if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+          console.log(`DNS resolved ${ALLOWED_IP_HOSTNAME} to ${ip}`);
+          allowedIPCache = ip;
+          allowedIPCacheTime = now;
+          return ip;
+        }
+      }
     }
+    
+    console.error(`No valid A record found for ${ALLOWED_IP_HOSTNAME}`);
+    return allowedIPCache;
+    
   } catch (err) {
-    console.error(`Error fetching allowed IP: ${err.message}`);
+    console.error(`DNS resolution error: ${err.message}`);
     return allowedIPCache; // Return cached IP if available
   }
 }
@@ -266,7 +302,7 @@ function jsonError(message, status = 400) {
 }
 
 // ===== Helper: Welcome page HTML =====
-function getWelcomeHTML(clientIP) {
+function getWelcomeHTML(clientIP, allowedIP) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -395,15 +431,27 @@ function getWelcomeHTML(clientIP) {
       font-size: 13px;
       font-weight: bold;
     }
+    .debug-link {
+      display: inline-block;
+      margin-top: 10px;
+      color: #2e7d32;
+      text-decoration: none;
+      font-size: 12px;
+    }
+    .debug-link:hover {
+      text-decoration: underline;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <h1>🚀 Cloudflare Proxy</h1>
-    <p class="subtitle">IP-Whitelisted Proxy Service</p>
+    <p class="subtitle">DNS-Based IP Whitelist</p>
     
     <div class="status">
       ✅ Access granted for IP: <span class="ip-badge">${clientIP}</span>
+      <br>
+      <a href="/_debug_ip" class="debug-link" target="_blank">🔍 Debug IP Info</a>
     </div>
     
     <form id="proxyForm">
@@ -424,12 +472,12 @@ function getWelcomeHTML(clientIP) {
     <div class="info">
       <h3>📖 Usage Instructions</h3>
       <ul>
-        <li><strong>Web Form:</strong> Enter any URL above and click the button</li>
+        <li><strong>Web Form:</strong> Enter any URL above</li>
         <li><strong>Direct URL:</strong> <span class="code">${self.location.origin}/https://example.com</span></li>
         <li><strong>Query Parameter:</strong> <span class="code">${self.location.origin}/?url=https://example.com</span></li>
       </ul>
       <p style="margin-top: 12px;">
-        <strong>Note:</strong> Only your whitelisted IP (resolved from publichomeip.duckdns.org) can access this proxy.
+        <strong>🔒 Security:</strong> Whitelisted IP resolved via DNS from <code>${ALLOWED_IP_HOSTNAME}</code> (currently: <code>${allowedIP}</code>)
       </p>
     </div>
   </div>
@@ -438,7 +486,6 @@ function getWelcomeHTML(clientIP) {
     const form = document.getElementById('proxyForm');
     const urlInput = document.getElementById('url');
 
-    // Pre-fill URL from query parameter if present
     const params = new URLSearchParams(window.location.search);
     if (params.has('url')) {
       urlInput.value = params.get('url');
@@ -454,18 +501,13 @@ function getWelcomeHTML(clientIP) {
         return;
       }
       
-      // Add https:// if no protocol specified
       if (!/^https?:\/\//i.test(url)) {
         url = 'https://' + url;
       }
       
       try {
-        // Validate URL
         new URL(url);
-        
-        // Redirect to proxied URL
         window.location.href = window.location.origin + '/' + url;
-        
       } catch (err) {
         alert('Invalid URL: ' + err.message);
       }
@@ -557,13 +599,26 @@ function getBlockedHTML(clientIP, allowedIP) {
       text-align: left;
       line-height: 1.6;
     }
+    .debug-link {
+      display: inline-block;
+      margin-top: 15px;
+      padding: 10px 20px;
+      background: #1976d2;
+      color: white;
+      text-decoration: none;
+      border-radius: 6px;
+      font-size: 14px;
+    }
+    .debug-link:hover {
+      background: #1565c0;
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="icon">🚫</div>
     <h1>Access Denied</h1>
-    <p class="subtitle">Your IP address is not authorized to use this proxy</p>
+    <p class="subtitle">Your IP address is not whitelisted</p>
     
     <div class="ip-info">
       <div class="ip-row">
@@ -574,13 +629,18 @@ function getBlockedHTML(clientIP, allowedIP) {
         <span class="ip-label">Allowed IP:</span>
         <span class="ip-value">${allowedIP}</span>
       </div>
+      <div class="ip-row">
+        <span class="ip-label">DNS Hostname:</span>
+        <span class="ip-value">${ALLOWED_IP_HOSTNAME}</span>
+      </div>
     </div>
+    
+    <a href="/_debug_ip" class="debug-link">🔍 View Debug Info</a>
     
     <div class="info">
       <strong>ℹ️ Information:</strong><br>
-      This proxy only accepts requests from the IP address resolved at 
-      <code>publichomeip.duckdns.org</code>. If you believe this is an error, 
-      verify that your current IP matches the one registered in the DuckDNS configuration.
+      This proxy resolves the allowed IP via DNS from <code>${ALLOWED_IP_HOSTNAME}</code>. 
+      The DNS A record must point to your current public IP address.
     </div>
   </div>
 </body>
