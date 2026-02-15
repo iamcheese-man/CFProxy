@@ -332,21 +332,42 @@ function detectSuspiciousRequest(req) {
   const url = new URL(req.url);
   const userAgent = req.headers.get("user-agent") || "";
   
+  // Only check the path and query, not the protocol
+  const pathAndQuery = (url.pathname + url.search).toLowerCase();
+  
   // Check for common attack patterns
   const suspiciousPatterns = [
-    /(\.\.|\/\/)/,                    // Path traversal
+    /\.\.\//,                         // Path traversal (../)
     /<script|javascript:|onerror=/i,  // XSS attempts
     /union.*select|drop.*table/i,     // SQL injection
     /\${.*}|<%.*%>/,                  // Template injection
+    /%00|%0[ad]/i,                    // Null byte injection
   ];
   
-  const fullUrl = url.href.toLowerCase();
   for (const pattern of suspiciousPatterns) {
-    if (pattern.test(fullUrl)) return true;
+    if (pattern.test(pathAndQuery)) return true;
   }
   
-  // Check for empty/suspicious user agents
-  if (!userAgent || userAgent.length < 10) return true;
+  // Check for suspicious user agents (but allow legitimate browsers)
+  if (userAgent && userAgent.length > 0) {
+    const suspiciousUAs = [
+      /bot/i,
+      /crawler/i,
+      /spider/i,
+      /scraper/i,
+      /curl/i,
+      /wget/i,
+      /python/i,
+    ];
+    
+    // Only flag if it's OBVIOUSLY a bot, not a real browser
+    const isLikelyBot = suspiciousUAs.some(pattern => pattern.test(userAgent)) &&
+                        !userAgent.includes('Mozilla') &&
+                        !userAgent.includes('Chrome') &&
+                        !userAgent.includes('Safari');
+    
+    if (isLikelyBot) return true;
+  }
   
   // Check for excessive query parameters (potential parameter pollution)
   if (url.searchParams.toString().length > 2000) return true;
