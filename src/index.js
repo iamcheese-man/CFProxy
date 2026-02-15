@@ -2,16 +2,20 @@ addEventListener("fetch", event => {
   event.respondWith(handleRequest(event.request, event));
 });
 
-const SECRET_KEY = "A53xR14L390"; // use an environment variable in production
 const RATE_LIMIT = 61;
 const RATE_WINDOW = 60 * 1000; // 60 seconds
+const IP_CHECK_URL = "https://publichomeip.duckdns.org";
+const IP_CACHE_TTL = 300; // Cache the allowed IP for 5 minutes
 
-// In-memory token store (resets on worker restart, suitable for short-lived tokens)
-const validTokens = new Map();
+// Cache for the allowed IP
+let allowedIPCache = null;
+let allowedIPCacheTime = 0;
 
 async function handleRequest(req, event) {
-  // ===== Rate limiting =====
+  // ===== Get client IP =====
   const clientIP = req.headers.get("cf-connecting-ip") || "unknown";
+  
+  // ===== Rate limiting =====
   const cacheKey = new Request(`https://ratelimit.internal/${clientIP}`);
   const now = Date.now();
   const cache = caches.default;
@@ -52,73 +56,26 @@ async function handleRequest(req, event) {
 
   const urlObj = new URL(req.url);
   
-  // ===== Token generation endpoint =====
-  if (urlObj.pathname === '/_generate_token' && req.method === 'POST') {
-    const body = await req.json().catch(() => ({}));
-    const password = body.password || req.headers.get("X-CFProxy-Auth");
-    
-    if (password !== SECRET_KEY) {
-      return jsonError("Invalid password", 401);
-    }
-    
-    // Generate a random token
-    const token = generateToken();
-    const expiresAt = Date.now() + (5 * 60 * 1000); // 5 minutes
-    
-    validTokens.set(token, expiresAt);
-    
-    // Clean up expired tokens
-    for (const [t, exp] of validTokens.entries()) {
-      if (Date.now() > exp) {
-        validTokens.delete(t);
-      }
-    }
-    
-    return new Response(JSON.stringify({ token, expiresIn: 300 }), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  }
-
-  // ===== Check authentication (header or token) =====
-  const authHeader = req.headers.get("X-CFProxy-Auth");
-  const tokenParam = urlObj.searchParams.get("_token");
+  // ===== Check IP Authorization =====
+  const allowedIP = await getAllowedIP();
   
-  let isAuthenticated = false;
-  
-  // Check header auth
-  if (authHeader === SECRET_KEY) {
-    isAuthenticated = true;
+  if (!allowedIP) {
+    return jsonError("Unable to verify allowed IP from publichomeip.duckdns.org", 503);
   }
   
-  // Check token auth
-  if (!isAuthenticated && tokenParam) {
-    const tokenExpiry = validTokens.get(tokenParam);
-    if (tokenExpiry && Date.now() < tokenExpiry) {
-      isAuthenticated = true;
-    }
-  }
-  
-  if (!isAuthenticated) {
-    // If it's a GET request without auth, return HTML password form
+  if (clientIP !== allowedIP) {
+    // Return an informative blocked page
     if (req.method === "GET") {
-      return new Response(getPasswordHTML(), {
-        status: 200,
+      return new Response(getBlockedHTML(clientIP, allowedIP), {
+        status: 403,
         headers: {
           "Content-Type": "text/html",
           "Access-Control-Allow-Origin": "*",
         },
       });
     }
-    // For other methods, return unauthorized error
-    return jsonError("Unauthorized: missing or invalid authentication", 401);
+    return jsonError(`Access denied. Your IP (${clientIP}) is not authorized. Allowed IP: ${allowedIP}`, 403);
   }
-
-  // Remove token from URL before processing
-  urlObj.searchParams.delete("_token");
 
   // ===== Determine target URL =====
   let target;
@@ -128,17 +85,28 @@ async function handleRequest(req, event) {
   } else {
     // Use the path as the target URL
     const path = urlObj.pathname.substring(1); // Remove leading /
-    if (path && path !== '_generate_token') {
+    if (path) {
       target = path;
-      // Add back the search params (without _token)
-      const searchStr = urlObj.search.replace(/[?&]_token=[^&]*/, '').replace(/^&/, '?');
-      if (searchStr && searchStr !== '?') {
-        target += searchStr;
+      // Add back the search params
+      if (urlObj.search && urlObj.search !== '?') {
+        target += urlObj.search;
       }
     }
   }
 
-  if (!target) return jsonError("Missing target URL", 400);
+  if (!target) {
+    // Show welcome page
+    if (req.method === "GET") {
+      return new Response(getWelcomeHTML(clientIP), {
+        status: 200,
+        headers: {
+          "Content-Type": "text/html",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+    return jsonError("Missing target URL", 400);
+  }
 
   if (!/^https?:\/\//i.test(target)) target = "https://" + target;
 
@@ -163,7 +131,7 @@ async function handleRequest(req, event) {
     return jsonError("Private/local addresses are blocked", 403);
   }
 
-  // ===== Build headers (strip X-CFProxy-Auth) =====
+  // ===== Build headers =====
   const headers = new Headers();
   for (const [key, value] of req.headers.entries()) {
     if (![
@@ -175,8 +143,7 @@ async function handleRequest(req, event) {
       "cf-connecting-ip",
       "cf-ray",
       "cf-visitor",
-      "cf-ipcountry",
-      "x-cfproxy-auth" // Strip the auth header
+      "cf-ipcountry"
     ].includes(key.toLowerCase())) {
       headers.set(key, value);
     }
@@ -230,6 +197,7 @@ async function handleRequest(req, event) {
   resHeaders.set("Access-Control-Allow-Headers", "*");
   resHeaders.set("Access-Control-Expose-Headers", "*");
   resHeaders.set("X-Proxied-By", "Cloudflare Worker");
+  resHeaders.set("X-Allowed-IP", allowedIP);
 
   // Remove headers that may break browser rendering
   resHeaders.delete("content-security-policy");
@@ -250,6 +218,42 @@ async function handleRequest(req, event) {
   return finalResponse;
 }
 
+// ===== Get allowed IP from publichomeip.duckdns.org =====
+async function getAllowedIP() {
+  const now = Date.now();
+  
+  // Return cached IP if still valid
+  if (allowedIPCache && (now - allowedIPCacheTime) < (IP_CACHE_TTL * 1000)) {
+    return allowedIPCache;
+  }
+  
+  try {
+    const response = await fetch(IP_CHECK_URL, {
+      signal: AbortSignal.timeout(5000),
+    });
+    
+    if (!response.ok) {
+      console.error(`Failed to fetch allowed IP: ${response.status}`);
+      return allowedIPCache; // Return cached IP if available
+    }
+    
+    const ip = (await response.text()).trim();
+    
+    // Validate IP format (simple check)
+    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) {
+      allowedIPCache = ip;
+      allowedIPCacheTime = now;
+      return ip;
+    } else {
+      console.error(`Invalid IP format received: ${ip}`);
+      return allowedIPCache;
+    }
+  } catch (err) {
+    console.error(`Error fetching allowed IP: ${err.message}`);
+    return allowedIPCache; // Return cached IP if available
+  }
+}
+
 // ===== Helper: JSON error =====
 function jsonError(message, status = 400) {
   return new Response(JSON.stringify({ error: message }), {
@@ -261,24 +265,14 @@ function jsonError(message, status = 400) {
   });
 }
 
-// ===== Helper: Generate random token =====
-function generateToken() {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let token = '';
-  for (let i = 0; i < 32; i++) {
-    token += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return token;
-}
-
-// ===== Helper: Password input HTML =====
-function getPasswordHTML() {
+// ===== Helper: Welcome page HTML =====
+function getWelcomeHTML(clientIP) {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Cloudflare Proxy - Authentication Required</title>
+  <title>Cloudflare Proxy - Welcome</title>
   <style>
     * {
       margin: 0;
@@ -298,7 +292,7 @@ function getPasswordHTML() {
       background: white;
       border-radius: 12px;
       box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-      max-width: 500px;
+      max-width: 600px;
       width: 100%;
       padding: 40px;
     }
@@ -312,6 +306,15 @@ function getPasswordHTML() {
       margin-bottom: 30px;
       font-size: 14px;
     }
+    .status {
+      background: #e8f5e9;
+      border: 2px solid #4caf50;
+      color: #2e7d32;
+      padding: 16px;
+      border-radius: 8px;
+      margin-bottom: 30px;
+      font-weight: 500;
+    }
     .form-group {
       margin-bottom: 20px;
     }
@@ -322,8 +325,7 @@ function getPasswordHTML() {
       font-weight: 500;
       font-size: 14px;
     }
-    input[type="text"],
-    input[type="password"] {
+    input[type="text"] {
       width: 100%;
       padding: 12px 16px;
       border: 2px solid #e0e0e0;
@@ -331,8 +333,7 @@ function getPasswordHTML() {
       font-size: 14px;
       transition: border-color 0.3s;
     }
-    input[type="text"]:focus,
-    input[type="password"]:focus {
+    input[type="text"]:focus {
       outline: none;
       border-color: #667eea;
     }
@@ -355,40 +356,55 @@ function getPasswordHTML() {
     button:active {
       transform: translateY(0);
     }
-    .error {
-      background: #fee;
-      border: 1px solid #fcc;
-      color: #c33;
-      padding: 12px;
-      border-radius: 8px;
-      margin-bottom: 20px;
-      font-size: 14px;
-      display: none;
-    }
     .info {
       background: #e3f2fd;
       border: 1px solid #90caf9;
       color: #1976d2;
-      padding: 12px;
+      padding: 16px;
       border-radius: 8px;
-      margin-top: 20px;
+      margin-top: 30px;
       font-size: 13px;
+      line-height: 1.6;
+    }
+    .info h3 {
+      margin-bottom: 12px;
+      font-size: 15px;
+    }
+    .info ul {
+      margin-left: 20px;
+      margin-top: 8px;
+    }
+    .info li {
+      margin: 6px 0;
     }
     .code {
       background: #f5f5f5;
-      padding: 2px 6px;
+      padding: 3px 8px;
       border-radius: 4px;
       font-family: 'Courier New', monospace;
       font-size: 12px;
+      color: #d32f2f;
+    }
+    .ip-badge {
+      display: inline-block;
+      background: #4caf50;
+      color: white;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      font-weight: bold;
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🔒 Proxy Authentication</h1>
-    <p class="subtitle">Enter your credentials to access the proxy service</p>
+    <h1>🚀 Cloudflare Proxy</h1>
+    <p class="subtitle">IP-Whitelisted Proxy Service</p>
     
-    <div id="error" class="error"></div>
+    <div class="status">
+      ✅ Access granted for IP: <span class="ip-badge">${clientIP}</span>
+    </div>
     
     <form id="proxyForm">
       <div class="form-group">
@@ -397,35 +413,30 @@ function getPasswordHTML() {
           type="text" 
           id="url" 
           name="url" 
-          placeholder="https://example.com"
+          placeholder="https://example.com or example.com"
           required
         />
       </div>
       
-      <div class="form-group">
-        <label for="password">Proxy Password</label>
-        <input 
-          type="password" 
-          id="password" 
-          name="password" 
-          placeholder="Enter your proxy password"
-          required
-        />
-      </div>
-      
-      <button type="submit">Access URL</button>
+      <button type="submit">Browse Through Proxy</button>
     </form>
     
     <div class="info">
-      <strong>API Usage:</strong> Add <span class="code">X-CFProxy-Auth</span> header with your password to programmatically access this proxy.
+      <h3>📖 Usage Instructions</h3>
+      <ul>
+        <li><strong>Web Form:</strong> Enter any URL above and click the button</li>
+        <li><strong>Direct URL:</strong> <span class="code">${self.location.origin}/https://example.com</span></li>
+        <li><strong>Query Parameter:</strong> <span class="code">${self.location.origin}/?url=https://example.com</span></li>
+      </ul>
+      <p style="margin-top: 12px;">
+        <strong>Note:</strong> Only your whitelisted IP (resolved from publichomeip.duckdns.org) can access this proxy.
+      </p>
     </div>
   </div>
 
   <script>
     const form = document.getElementById('proxyForm');
-    const errorDiv = document.getElementById('error');
     const urlInput = document.getElementById('url');
-    const passwordInput = document.getElementById('password');
 
     // Pre-fill URL from query parameter if present
     const params = new URLSearchParams(window.location.search);
@@ -433,20 +444,13 @@ function getPasswordHTML() {
       urlInput.value = params.get('url');
     }
 
-    form.addEventListener('submit', async (e) => {
+    form.addEventListener('submit', (e) => {
       e.preventDefault();
-      errorDiv.style.display = 'none';
       
       let url = urlInput.value.trim();
-      const password = passwordInput.value;
       
       if (!url) {
-        showError('Please enter a target URL');
-        return;
-      }
-      
-      if (!password) {
-        showError('Please enter your proxy password');
+        alert('Please enter a target URL');
         return;
       }
       
@@ -459,37 +463,126 @@ function getPasswordHTML() {
         // Validate URL
         new URL(url);
         
-        // Generate a temporary token
-        const tokenResponse = await fetch(window.location.origin + '/_generate_token', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ password })
-        });
-        
-        if (!tokenResponse.ok) {
-          const data = await tokenResponse.json().catch(() => ({}));
-          showError(data.error || 'Invalid password');
-          return;
-        }
-        
-        const { token } = await tokenResponse.json();
-        
-        // Redirect to proxied URL with token - use query parameter method for clarity
-        const proxyUrl = window.location.origin + '/?url=' + encodeURIComponent(url) + '&_token=' + encodeURIComponent(token);
-        window.location.href = proxyUrl;
+        // Redirect to proxied URL
+        window.location.href = window.location.origin + '/' + url;
         
       } catch (err) {
-        showError('Request failed: ' + err.message);
+        alert('Invalid URL: ' + err.message);
       }
     });
-    
-    function showError(message) {
-      errorDiv.textContent = message;
-      errorDiv.style.display = 'block';
-    }
   </script>
+</body>
+</html>`;
+}
+
+// ===== Helper: Blocked page HTML =====
+function getBlockedHTML(clientIP, allowedIP) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Access Denied - IP Not Whitelisted</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background: linear-gradient(135deg, #f44336 0%, #e91e63 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      max-width: 500px;
+      width: 100%;
+      padding: 40px;
+      text-align: center;
+    }
+    .icon {
+      font-size: 64px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      color: #d32f2f;
+      margin-bottom: 10px;
+      font-size: 28px;
+    }
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+    .ip-info {
+      background: #ffebee;
+      border: 2px solid #ef5350;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    .ip-row {
+      margin: 10px 0;
+      font-size: 14px;
+    }
+    .ip-label {
+      font-weight: 600;
+      color: #d32f2f;
+      display: inline-block;
+      width: 120px;
+    }
+    .ip-value {
+      font-family: 'Courier New', monospace;
+      background: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      color: #333;
+    }
+    .info {
+      background: #e3f2fd;
+      border: 1px solid #90caf9;
+      color: #1976d2;
+      padding: 16px;
+      border-radius: 8px;
+      margin-top: 20px;
+      font-size: 13px;
+      text-align: left;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="icon">🚫</div>
+    <h1>Access Denied</h1>
+    <p class="subtitle">Your IP address is not authorized to use this proxy</p>
+    
+    <div class="ip-info">
+      <div class="ip-row">
+        <span class="ip-label">Your IP:</span>
+        <span class="ip-value">${clientIP}</span>
+      </div>
+      <div class="ip-row">
+        <span class="ip-label">Allowed IP:</span>
+        <span class="ip-value">${allowedIP}</span>
+      </div>
+    </div>
+    
+    <div class="info">
+      <strong>ℹ️ Information:</strong><br>
+      This proxy only accepts requests from the IP address resolved at 
+      <code>publichomeip.duckdns.org</code>. If you believe this is an error, 
+      verify that your current IP matches the one registered in the DuckDNS configuration.
+    </div>
+  </div>
 </body>
 </html>`;
 }
