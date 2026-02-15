@@ -260,22 +260,40 @@ async function handleRequest(req, event) {
   // ===== 11. BUILD HEADERS =====
   const headers = new Headers();
   for (const [key, value] of req.headers.entries()) {
+    const lowerKey = key.toLowerCase();
+    // Skip proxy-specific headers and headers that might cause issues
     if (!["host", "origin", "referer", "x-forwarded-for", "x-real-ip",
-          "cf-connecting-ip", "cf-ray", "cf-visitor", "cf-ipcountry"].includes(key.toLowerCase())) {
+          "cf-connecting-ip", "cf-ray", "cf-visitor", "cf-ipcountry",
+          "cf-worker", "x-forwarded-proto", "x-forwarded-host"].includes(lowerKey)) {
       headers.set(key, value);
     }
   }
   
-  if (clientIP) {
-    headers.set("cf-connecting-ip", clientIP);
-    headers.set("x-forwarded-for", clientIP);
+  // CRITICAL: Set Host header to target hostname
+  headers.set("Host", targetUrl.hostname);
+  
+  // Set standard browser headers
+  if (!headers.has("User-Agent")) {
+    headers.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
   }
   
-  headers.set("host", targetUrl.host);
-  headers.set("user-agent", headers.get("user-agent") ||
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-  headers.set("accept", headers.get("accept") ||
-    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+  }
+  
+  if (!headers.has("Accept-Language")) {
+    headers.set("Accept-Language", "en-US,en;q=0.9");
+  }
+  
+  if (!headers.has("Accept-Encoding")) {
+    headers.set("Accept-Encoding", "gzip, deflate, br");
+  }
+  
+  // Add forwarded-for for transparency
+  if (clientIP && clientIP !== "unknown") {
+    headers.set("X-Forwarded-For", clientIP);
+    headers.set("X-Real-IP", clientIP);
+  }
   
   // ===== 12. FETCH TARGET =====
   let body = null;
@@ -290,7 +308,8 @@ async function handleRequest(req, event) {
   
   let res;
   try {
-    res = await fetch(targetUrl.toString(), {
+    // Fetch using the complete target URL (not just hostname)
+    res = await fetch(targetUrl.href, {
       method: req.method,
       headers,
       body,
